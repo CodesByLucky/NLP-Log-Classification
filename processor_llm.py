@@ -1,39 +1,57 @@
-from dotenv import load_dotenv
-from groq import Groq
-import json
-import re
+"""Tier 3: LLM classification for sources with too little labeled data.
 
+LegacyCRM has only a handful of labeled examples (7 in the training set),
+which is not enough to train a classifier, so these logs go to an LLM with
+a constrained prompt instead.
+"""
+import os
+import re
+from functools import lru_cache
+
+from dotenv import load_dotenv
 
 load_dotenv()
 
-groq = Groq()
+LLM_CATEGORIES = ("Workflow Error", "Deprecation Warning")
+# deepseek-r1-distill-llama-70b (the original model) was retired by Groq in Oct 2025.
+DEFAULT_MODEL = "openai/gpt-oss-120b"
+
+
+@lru_cache(maxsize=1)
+def _client():
+    from groq import Groq
+
+    return Groq()  # reads GROQ_API_KEY from the environment
+
+
+def parse_category(content):
+    """Extract the category from <category></category> tags.
+
+    Reasoning text inside <think> blocks is removed first, and anything
+    outside the allowed categories becomes "Unclassified".
+    """
+    content = re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL)
+    match = re.search(r"<category>(.*?)</category>", content, flags=re.DOTALL)
+    if not match:
+        return "Unclassified"
+    category = match.group(1).strip()
+    return category if category in LLM_CATEGORIES else "Unclassified"
+
 
 def classify_with_llm(log_msg):
-    """
-    Generate a variant of the input sentence. For example,
-    If input sentence is "User session timed out unexpectedly, user ID: 9250.",
-    variant would be "Session timed out for user 9251"
-    """
-    prompt = f'''Classify the log message into one of these categories: 
-    (1) Workflow Error, (2) Deprecation Warning.
-    If you can't figure out a category, use "Unclassified".
-    Put the category inside <category> </category> tags. 
-    Log message: {log_msg}'''
-
-    chat_completion = groq.chat.completions.create(
-        messages=[{"role": "user", "content": prompt}],
-        # model="llama-3.3-70b-versatile",
-        model="deepseek-r1-distill-llama-70b",
-        temperature=0.5
+    categories = ", ".join(f"({i}) {c}" for i, c in enumerate(LLM_CATEGORIES, 1))
+    prompt = (
+        f"Classify the log message into one of these categories: {categories}.\n"
+        'If none fits, use "Unclassified".\n'
+        "Reply with only the category inside <category></category> tags.\n"
+        f"Log message: {log_msg}"
     )
-
-    content = chat_completion.choices[0].message.content
-    match = re.search(r'<category>(.*)<\/category>', content, flags=re.DOTALL)
-    category = "Unclassified"
-    if match:
-        category = match.group(1)
-
-    return category
+    response = _client().chat.completions.create(
+        model=os.getenv("GROQ_MODEL", DEFAULT_MODEL),
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    return parse_category(response.choices[0].message.content)
 
 
 if __name__ == "__main__":
@@ -41,4 +59,3 @@ if __name__ == "__main__":
         "Case escalation for ticket ID 7324 failed because the assigned support agent is no longer active."))
     print(classify_with_llm(
         "The 'ReportGenerator' module will be retired in version 4.0. Please migrate to the 'AdvancedAnalyticsSuite' by Dec 2025"))
-    print(classify_with_llm("System reboot initiated by user 12345."))
