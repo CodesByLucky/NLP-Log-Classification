@@ -1,0 +1,11 @@
+# Lightweight test dependencies: the tests stub out the embedding model and
+# the LLM, so sentence-transformers / torch / groq are not needed here.
+fastapi>=0.115.6
+python-multipart>=0.0.20
+httpx>=0.27
+python-dotenv>=1.0.1
+joblib>=1.3.2
+numpy>=1.26
+pandas>=2.2.3
+scikit-learn>=1.6,<2
+pytest>=8.0
