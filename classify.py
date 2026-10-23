@@ -1,54 +1,65 @@
-from processor_regex import classify_with_regex
-from processor_bert import classify_with_bert
+"""Hybrid log classification pipeline.
+
+Each log goes to the cheapest tier that can label it:
+  1. Regex rules        - fixed templates, no inference
+  2. Embeddings + LR    - sources with plenty of labeled data
+  3. LLM                - sources with too little labeled data (LegacyCRM)
+"""
+from pathlib import Path
+
+import pandas as pd
+
+from processor_bert import classify_with_bert_batch
 from processor_llm import classify_with_llm
+from processor_regex import classify_with_regex
+
+ROOT = Path(__file__).resolve().parent
+LLM_SOURCES = {"LegacyCRM"}
+
 
 def classify(logs):
-    labels = []
-    for source, log_msg in logs:
-        label = classify_log(source, log_msg)
-        labels.append(label)
+    """Classify (source, log_message) pairs and return labels in input order.
+
+    Logs that need the embedding model are collected and encoded in one batch.
+    """
+    labels = [None] * len(logs)
+    pending_bert = []
+
+    for i, (source, message) in enumerate(logs):
+        if source in LLM_SOURCES:
+            labels[i] = classify_with_llm(message)
+            continue
+        label = classify_with_regex(message)
+        if label:
+            labels[i] = label
+        else:
+            pending_bert.append(i)
+
+    if pending_bert:
+        bert_labels = classify_with_bert_batch([logs[i][1] for i in pending_bert])
+        for i, label in zip(pending_bert, bert_labels):
+            labels[i] = label
+
     return labels
 
 
 def classify_log(source, log_msg):
-    if source == "LegacyCRM":
-        label = classify_with_llm(log_msg)
-    else:
-        label = classify_with_regex(log_msg)
-        if not label:
-            label = classify_with_bert(log_msg)
-    return label
+    return classify([(source, log_msg)])[0]
 
-def classify_csv(input_file):
-    import pandas as pd
-    df = pd.read_csv(input_file)
 
-    # Perform classification
+def classify_dataframe(df):
+    """Return a copy of df with a target_label column added."""
+    df = df.copy()
     df["target_label"] = classify(list(zip(df["source"], df["log_message"])))
+    return df
 
-    # Save the modified file
-    output_file = "output.csv"
-    df.to_csv(output_file, index=False)
 
+def classify_csv(input_file, output_file):
+    df = pd.read_csv(input_file, skipinitialspace=True)
+    classify_dataframe(df).to_csv(output_file, index=False)
     return output_file
 
-if __name__ == '__main__':
-    classify_csv("test.csv")
-    # logs = [
-    #     ("ModernCRM", "IP 192.168.133.114 blocked due to potential attack"),
-    #     ("BillingSystem", "User 12345 logged in."),
-    #     ("AnalyticsEngine", "File data_6957.csv uploaded successfully by user User265."),
-    #     ("AnalyticsEngine", "Backup completed successfully."),
-    #     ("ModernHR", "GET /v2/54fadb412c4e40cdbaed9335e4c35a9e/servers/detail HTTP/1.1 RCODE  200 len: 1583 time: 0.1878400"),
-    #     ("ModernHR", "Admin access escalation detected for user 9429"),
-    #     ("LegacyCRM", "Case escalation for ticket ID 7324 failed because the assigned support agent is no longer active."),
-    #     ("LegacyCRM", "Invoice generation process aborted for order ID 8910 due to invalid tax calculation module."),
-    #     ("LegacyCRM", "The 'BulkEmailSender' feature is no longer supported. Use 'EmailCampaignManager' for improved functionality."),
-    #     ("LegacyCRM", " The 'ReportGenerator' module will be retired in version 4.0. Please migrate to the 'AdvancedAnalyticsSuite' by Dec 2025")
-    # ]
-    # labels = classify(logs)
-    #
-    # for log, label in zip(logs, labels):
-    #     print(log[0], "->", label)
 
-
+if __name__ == "__main__":
+    out = classify_csv(ROOT / "resources" / "test.csv", ROOT / "resources" / "output.csv")
+    print(f"Saved results to {out}")
