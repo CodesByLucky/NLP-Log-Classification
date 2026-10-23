@@ -1,142 +1,120 @@
-# 🔍 NLP Log Classification System
+# Hybrid NLP Log Classification
 
-A hybrid log classification system that combines **Regex**, **Sentence Transformers + Logistic Regression**, and **LLM-based** approaches to intelligently classify log messages across varying complexity levels.
+[![tests](https://github.com/CodesByLucky/NLP-Log-Classification/actions/workflows/tests.yml/badge.svg)](https://github.com/CodesByLucky/NLP-Log-Classification/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)
 
----
+A log classification service that sends each log message to the **cheapest method that can label it reliably**: regex rules for fixed templates, sentence embeddings + Logistic Regression for sources with plenty of labeled data, and an LLM for a legacy source with almost none. It is served as a FastAPI endpoint that takes a CSV of logs and returns it labeled.
 
-## ✨ Features
+## Results
 
-- **Multi-Strategy Classification** — Uses three complementary classification approaches for maximum accuracy
-- **FastAPI Server** — Production-ready REST API for log classification
-- **CSV Upload** — Simply upload a CSV file and get classified results back
-- **Pre-trained Models** — Includes a ready-to-use trained model for immediate use
+The embedding classifier (tier 2) on a 30% held-out split (571 logs, 5 classes):
 
----
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| Critical Error | 0.91 | 1.00 | 0.95 | 48 |
+| Error | 0.98 | 0.89 | 0.93 | 47 |
+| HTTP Status | 1.00 | 1.00 | 1.00 | 304 |
+| Resource Usage | 1.00 | 1.00 | 1.00 | 49 |
+| Security Alert | 1.00 | 0.99 | 1.00 | 123 |
+| **Accuracy / macro F1** | | | **0.99 / 0.98** | 571 |
 
-## 🏗️ Architecture
+How the 2,410 training logs split across tiers:
 
-The system uses a **hybrid classification framework** that routes log messages through the most appropriate classifier:
+| Tier | Logs | Share | Why this tier |
+|---|---|---|---|
+| Regex rules | 500 | 20.7% | Fixed templates (backups, logins, uploads); no inference cost |
+| Embeddings + Logistic Regression | 1,903 | 79.0% | Varied wording but plenty of labeled examples |
+| LLM | 7 | 0.3% | LegacyCRM: too few examples to train a classifier |
 
-| Approach | Best For | Details |
-|----------|----------|---------|
-| **Regex** | Simple, predictable patterns | Rule-based pattern matching for well-known log formats |
-| **BERT + Logistic Regression** | Complex patterns with training data | Sentence Transformer embeddings fed into a Logistic Regression classifier |
-| **LLM** | Complex patterns without labeled data | Large Language Model fallback for unstructured or rare log formats |
+## How it works
 
-![Architecture Diagram](resources/arch.png)
-
----
-
-## 📁 Project Structure
-
-```
-├── server.py                  # FastAPI server with /classify endpoint
-├── classify.py                # Core classification orchestration logic
-├── processor_regex.py         # Regex-based classifier
-├── processor_bert.py          # BERT + Logistic Regression classifier
-├── processor_llm.py           # LLM-based classifier
-├── requirements.txt           # Python dependencies
-├── models/
-│   └── log_classifier.joblib  # Pre-trained classification model
-├── resources/
-│   ├── arch.png               # Architecture diagram
-│   ├── test.csv               # Sample test data
-│   └── output.csv             # Sample output data
-└── training/
-    ├── log_classification.ipynb   # Model training notebook
-    └── dataset/
-        └── synthetic_logs.csv     # Training dataset
+```mermaid
+flowchart TD
+    A[Log message + source] --> B{Source is LegacyCRM?}
+    B -- yes --> L[LLM via Groq<br/>Workflow Error / Deprecation Warning]
+    B -- no --> R{Regex rule matches?}
+    R -- yes --> RL[Label from rule]
+    R -- no --> E[all-MiniLM-L6-v2 embedding<br/>384 dims, batched]
+    E --> C{Logistic Regression<br/>confidence ≥ 0.5?}
+    C -- yes --> CL[Predicted label]
+    C -- no --> U[Unclassified]
 ```
 
----
+1. **Pattern discovery.** In the [training notebook](training/log_classification.ipynb), all logs are embedded with `all-MiniLM-L6-v2` and clustered with **DBSCAN** (cosine distance). Large, uniform clusters are fixed templates, so they become regex rules in [`processor_regex.py`](processor_regex.py).
+2. **Regex tier.** Matching logs are labeled instantly, with no model calls.
+3. **Embedding tier.** Remaining logs are embedded in a single batch and classified by Logistic Regression ([`processor_bert.py`](processor_bert.py)). Predictions below 0.5 confidence return `Unclassified` rather than a wrong label.
+4. **LLM tier.** LegacyCRM logs go to an LLM on Groq with a constrained prompt; the answer is parsed from `<category>` tags and validated against the allowed labels ([`processor_llm.py`](processor_llm.py)).
 
-## 🚀 Getting Started
+**Labels:** HTTP Status, Security Alert, System Notification, Error, Resource Usage, Critical Error, User Action, Workflow Error, Deprecation Warning.
 
-### Prerequisites
-
-- Python 3.8+
-- pip
-
-### Installation
-
-1. **Clone the repository**:
-   ```bash
-   git clone <your-repo-url>
-   cd project-nlp-log-classification
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Start the server**:
-   ```bash
-   uvicorn server:app --reload
-   ```
-
-4. **Access the API**:
-   - API Endpoint: `http://127.0.0.1:8000/classify/`
-   - Swagger Docs: `http://127.0.0.1:8000/docs`
-   - ReDoc: `http://127.0.0.1:8000/redoc`
-
----
-
-## 📖 Usage
-
-### API Endpoint
-
-**POST** `/classify/` — Upload a CSV file for classification.
-
-**Input CSV format** (must contain these columns):
-
-| source | log_message |
-|--------|-------------|
-| ModernCRM | IP 192.168.133.114 blocked due to potential attack |
-| BillingSystem | User 12345 logged in |
-
-**Output**: Returns a CSV file with an added `target_label` column containing the classification result.
-
-### Command Line
-
-You can also classify logs directly via the command line:
+## Quick start
 
 ```bash
-python classify.py
+git clone https://github.com/CodesByLucky/NLP-Log-Classification.git
+cd NLP-Log-Classification
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # add your GROQ_API_KEY
+uvicorn server:app --reload
 ```
 
-This reads from `test.csv` and outputs to `output.csv`.
+Open http://127.0.0.1:8000/docs for the interactive API docs.
 
----
+### Classify a CSV
 
-## 🧠 How It Works
+The CSV needs `source` and `log_message` columns:
 
-1. **Routing Logic** — The system checks the log source:
-   - `LegacyCRM` logs → routed to the **LLM classifier** (handles unstructured legacy formats)
-   - All other sources → first tries **Regex**, then falls back to **BERT classifier**
+```bash
+curl -X POST http://127.0.0.1:8000/classify/ \
+  -F "file=@resources/test.csv" -o classified_logs.csv
+```
 
-2. **Training** — The BERT-based classifier is trained using the Jupyter notebook in `training/log_classification.ipynb` on synthetic log data.
+The response is the same CSV with a `target_label` column added (see [`resources/output.csv`](resources/output.csv)).
 
----
+### Command line
 
-## 🛠️ Tech Stack
+```bash
+python classify.py   # reads resources/test.csv, writes resources/output.csv
+```
 
-- **Python** — Core language
-- **FastAPI** — Web framework for the REST API
-- **Sentence Transformers** — For generating text embeddings
-- **scikit-learn** — Logistic Regression classifier
-- **Pandas** — Data manipulation
-- **Uvicorn** — ASGI server
+## Tests
 
----
+The tests stub out the embedding model and the LLM, so they run in seconds with no API key or model download:
 
-## 📄 License
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+## Project structure
+
+```
+├── server.py                 # FastAPI app: /classify/ and /health
+├── classify.py               # Routing logic across the three tiers
+├── processor_regex.py        # Tier 1: regex rules
+├── processor_bert.py         # Tier 2: sentence embeddings + Logistic Regression
+├── processor_llm.py          # Tier 3: LLM classification via Groq
+├── models/log_classifier.joblib
+├── training/
+│   ├── log_classification.ipynb   # DBSCAN clustering, regex design, model training
+│   └── dataset/synthetic_logs.csv # 2,410 labeled logs from 6 sources
+├── resources/                # Sample input/output and architecture diagram
+└── tests/
+```
+
+## Limitations and next steps
+
+- The dataset is synthetic; real production logs would need re-clustering and retraining.
+- Accuracy above covers the embedding tier only. An end-to-end evaluation across all three tiers is a next step, as is evaluating the LLM tier, which has only 7 labeled examples.
+- The default LLM is `openai/gpt-oss-120b` on Groq (the original `deepseek-r1-distill-llama-70b` was retired by Groq). Set `GROQ_MODEL` to use another model.
+
+## Tech stack
+
+Python · Sentence Transformers (Hugging Face) · scikit-learn · DBSCAN · Groq LLM API · FastAPI · Pandas · pytest · GitHub Actions
+
+## Author
+
+**Lucky Samant** · [luckysamant.in](https://luckysamant.in) · [LinkedIn](https://www.linkedin.com/in/luckysamant/) · [GitHub](https://github.com/CodesByLucky)
 
 This project is open source and available for personal and educational use.
-
----
-
-## 👤 Author
-
-**Lucky**
-
